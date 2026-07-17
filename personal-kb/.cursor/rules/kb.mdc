@@ -1,20 +1,17 @@
 ---
-description: 个人知识库检索约定 — 优先用 personal-kb MCP
+description: 个人知识库检索约定 — 多根原地索引，优先 MCP
 alwaysApply: true
 ---
 
 # 个人知识库（personal-kb）
 
-当用户询问个人笔记、资料、既往结论、或「知识库里有没有…」时：
+文档默认留在各项目原目录（如 `D:/项目`），知识库只做**原地索引**，不要建议用户复制/搬迁文档。
 
-1. **先调用 MCP `personal-kb`**：`kb_search` → 需要全文时再 `kb_get`
-2. 回答时**引用笔记路径**（如 `topics/cursor-kb.md`），不要编造未检索到的内容
-3. 若检索为空：说明未命中，可建议用户把笔记放进 `personal-kb/kb/` 后执行 `python3 mcp/kb.py index`
-4. 批量改笔记后可用 `kb_reindex`；日常小改索引会在下次 `kb_stats` / 空库时自动重建
+当用户询问项目文档、笔记、既往结论时：
 
-目录约定：
+1. 先调用 MCP `personal-kb`：`kb_search`（可加 `root: projects`）→ 需要全文时 `kb_get`
+2. 引用返回的 **logical path**（如 `projects/项目A/docs/需求.md`）和 `abs_path`
+3. 未命中时：说明可能需 `kb_reindex`；不要要求把文件复制进 `kb/`
+4. `kb/` 仅用于跨项目随笔；项目文档以配置的 `projects` root 为准
 
-- `kb/inbox/` — 速记、未整理
-- `kb/topics/` — 主题笔记
-- `kb/projects/` — 项目备忘
-- `kb/refs/` — 摘录与外链摘要
+配置：`personal-kb/config.json`（参考 `config.example.json`）。

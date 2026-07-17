@@ -14,9 +14,9 @@ tags: cursor, architecture, local-first
 
 ## 架构（三层）
 
-1. **笔记层**：纯 Markdown（本目录）
+1. **原文层**：仍在 `D:/项目/...` 等原目录（多根配置，**不复制**）
 2. **检索层**：SQLite FTS5 trigram（中英都行，无 embedding）
-3. **编排层**：Cursor Agent 通过 MCP 调 `kb_search` / `kb_get`
+3. **编排层**：Cursor Agent 通过 MCP 调 `kb_search` / `kb_get`（读全文优先读原文件）
 
 ## 为什么不用向量库
 
@@ -24,6 +24,6 @@ tags: cursor, architecture, local-first
 
 ## 日常流程
 
-1. 写笔记到 `kb/`
-2. `python3 mcp/kb.py index`（或对话里 `kb_reindex`）
-3. 在 Cursor 里用自然语言提问
+1. 文档继续写在各项目文件夹（只维护一份）
+2. `python3 mcp/kb.py index`（或对话里 `kb_reindex`）更新索引
+3. 在 Cursor 里用自然语言提问；可用 `--root projects` 限定项目盘

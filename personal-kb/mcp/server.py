@@ -3,10 +3,10 @@
 
 Tools:
   - kb_search: FTS5 trigram search (Chinese + English friendly)
-  - kb_get:    read a note by relative path
+  - kb_get:    read a note by logical path (prefers live disk read)
   - kb_list:   list notes (optional prefix / limit)
-  - kb_stats:  index stats
-  - kb_reindex: rebuild index from disk
+  - kb_stats:  index stats + configured roots
+  - kb_reindex: rebuild index from configured roots (in-place, no copy)
 
 stdlib only — no pip install required.
 """
@@ -21,32 +21,30 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Allow `python server.py` from any cwd
 _MCP_DIR = Path(__file__).resolve().parent
 if str(_MCP_DIR) not in sys.path:
     sys.path.insert(0, str(_MCP_DIR))
 
-from indexer import connect, default_paths, init_schema, rebuild  # noqa: E402
+from config import load_config  # noqa: E402
+from indexer import connect, init_schema, rebuild_from_config  # noqa: E402
 
 SERVER_NAME = "personal-kb"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "0.2.0"
 PROTOCOL_VERSION = "2024-11-05"
 
 
-def env_paths() -> tuple[Path, Path]:
-    kb_default, db_default = default_paths()
-    kb = Path(os.environ.get("PERSONAL_KB_ROOT", kb_default)).expanduser()
-    db = Path(os.environ.get("PERSONAL_KB_DB", db_default)).expanduser()
-    return kb, db
+def current_config() -> dict[str, Any]:
+    return load_config()
 
 
-def ensure_db(db_path: Path, kb_root: Path) -> sqlite3.Connection:
+def ensure_db(cfg: dict[str, Any]) -> sqlite3.Connection:
+    db_path: Path = cfg["db_path"]
     conn = connect(db_path)
     init_schema(conn)
     count = conn.execute("SELECT COUNT(*) AS c FROM notes").fetchone()["c"]
-    if count == 0 and kb_root.is_dir():
+    if count == 0:
         conn.close()
-        rebuild(kb_root, db_path)
+        rebuild_from_config(cfg)
         conn = connect(db_path)
         init_schema(conn)
     return conn
@@ -58,7 +56,6 @@ def snippet(text: str, query: str, radius: int = 80) -> str:
     q = query.strip()
     idx = text.lower().find(q.lower()) if q else -1
     if idx < 0:
-        # try first CJK / word chunk of query
         for part in re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9_]{2,}", q):
             idx = text.lower().find(part.lower())
             if idx >= 0:
@@ -79,9 +76,9 @@ def tool_defs() -> list[dict[str, Any]]:
         {
             "name": "kb_search",
             "description": (
-                "Search the local personal knowledge base (Markdown notes) "
-                "using SQLite FTS5 trigram. Good for Chinese and English. "
-                "Returns path, title, tags, and a short snippet."
+                "Search the local personal knowledge base. Documents stay in their "
+                "original project folders (multi-root, in-place index). "
+                "Returns logical path like projects/App/docs/x.md, abs_path, snippet."
             ),
             "inputSchema": {
                 "type": "object",
@@ -89,6 +86,10 @@ def tool_defs() -> list[dict[str, Any]]:
                     "query": {
                         "type": "string",
                         "description": "Search query (keywords or phrase)",
+                    },
+                    "root": {
+                        "type": "string",
+                        "description": "Optional root id filter, e.g. projects",
                     },
                     "limit": {
                         "type": "integer",
@@ -102,15 +103,16 @@ def tool_defs() -> list[dict[str, Any]]:
         {
             "name": "kb_get",
             "description": (
-                "Read the full content of a knowledge-base note by its "
-                "relative path (as returned by kb_search / kb_list)."
+                "Read a document by logical path from kb_search/kb_list "
+                "(e.g. projects/MyApp/需求.md). Prefers live read from the original "
+                "file on disk so you see latest edits without copying."
             ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Relative path under kb/, e.g. topics/cursor.md",
+                        "description": "Logical path, e.g. notes/topics/x.md or projects/App/a.md",
                     },
                 },
                 "required": ["path"],
@@ -118,14 +120,18 @@ def tool_defs() -> list[dict[str, Any]]:
         },
         {
             "name": "kb_list",
-            "description": "List notes in the knowledge base, optionally filtered by path prefix.",
+            "description": "List indexed documents, optionally filtered by path prefix or root id.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "prefix": {
                         "type": "string",
-                        "description": "Path prefix filter, e.g. topics/",
+                        "description": "Path prefix filter, e.g. projects/MyApp/",
                         "default": "",
+                    },
+                    "root": {
+                        "type": "string",
+                        "description": "Optional root id filter",
                     },
                     "limit": {
                         "type": "integer",
@@ -137,60 +143,79 @@ def tool_defs() -> list[dict[str, Any]]:
         },
         {
             "name": "kb_stats",
-            "description": "Show index statistics (note count, last indexed time, paths).",
+            "description": "Show index statistics and configured source roots (in-place paths).",
             "inputSchema": {"type": "object", "properties": {}},
         },
         {
             "name": "kb_reindex",
             "description": (
-                "Rebuild the FTS index from Markdown files on disk. "
-                "Call after adding/editing many notes outside Cursor."
+                "Rebuild the FTS index by scanning configured roots in place. "
+                "Does not copy files. Call after many add/update/delete operations."
             ),
             "inputSchema": {"type": "object", "properties": {}},
         },
     ]
 
 
-def kb_search(conn: sqlite3.Connection, query: str, limit: int = 8) -> dict:
+def kb_search(
+    conn: sqlite3.Connection,
+    query: str,
+    limit: int = 8,
+    root: str | None = None,
+) -> dict:
     q = (query or "").strip()
     if not q:
         return {"error": "query is required"}
     limit = max(1, min(int(limit or 8), 20))
-
-    # FTS5 trigram: quote multi-token queries as a phrase when possible
+    root = (root or "").strip() or None
     fts_query = q.replace('"', " ")
-    rows = conn.execute(
-        """
-        SELECT n.path, n.title, n.tags, n.body, n.mtime,
+
+    sql = """
+        SELECT n.path, n.root_id, n.rel_path, n.abs_path, n.title, n.tags, n.body, n.mtime,
                bm25(notes_fts) AS score
         FROM notes_fts
         JOIN notes n ON n.rowid = notes_fts.rowid
         WHERE notes_fts MATCH ?
-        ORDER BY score
-        LIMIT ?
-        """,
-        (fts_query, limit),
-    ).fetchall()
+    """
+    params: list[Any] = [fts_query]
+    if root:
+        sql += " AND n.root_id = ?"
+        params.append(root)
+    sql += " ORDER BY score LIMIT ?"
+    params.append(limit)
+    rows = conn.execute(sql, params).fetchall()
 
-    # Fallback for very short queries / odd punctuation: LIKE
     if not rows and len(q) >= 1:
         like = f"%{q}%"
-        rows = conn.execute(
-            """
-            SELECT path, title, tags, body, mtime, 0.0 AS score
-            FROM notes
-            WHERE title LIKE ? OR tags LIKE ? OR body LIKE ?
-            ORDER BY mtime DESC
-            LIMIT ?
-            """,
-            (like, like, like, limit),
-        ).fetchall()
+        if root:
+            rows = conn.execute(
+                """
+                SELECT path, root_id, rel_path, abs_path, title, tags, body, mtime, 0.0 AS score
+                FROM notes
+                WHERE root_id = ? AND (title LIKE ? OR tags LIKE ? OR body LIKE ?)
+                ORDER BY mtime DESC LIMIT ?
+                """,
+                (root, like, like, like, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT path, root_id, rel_path, abs_path, title, tags, body, mtime, 0.0 AS score
+                FROM notes
+                WHERE title LIKE ? OR tags LIKE ? OR body LIKE ?
+                ORDER BY mtime DESC LIMIT ?
+                """,
+                (like, like, like, limit),
+            ).fetchall()
 
     results = []
     for r in rows:
         results.append(
             {
                 "path": r["path"],
+                "root_id": r["root_id"],
+                "rel_path": r["rel_path"],
+                "abs_path": r["abs_path"],
                 "title": r["title"],
                 "tags": r["tags"],
                 "mtime": r["mtime"],
@@ -198,90 +223,164 @@ def kb_search(conn: sqlite3.Connection, query: str, limit: int = 8) -> dict:
                 "snippet": snippet(r["body"], q),
             }
         )
-    return {"query": q, "count": len(results), "results": results}
+    return {"query": q, "root": root, "count": len(results), "results": results}
 
 
-def kb_get(conn: sqlite3.Connection, kb_root: Path, path: str) -> dict:
-    rel = (path or "").strip().lstrip("/").replace("\\", "/")
-    if not rel or ".." in rel.split("/"):
+def _allowed_abs_paths(cfg: dict[str, Any]) -> list[Path]:
+    return [r["path"].resolve() for r in cfg["roots"]]
+
+
+def _is_under_roots(file_path: Path, roots: list[Path]) -> bool:
+    resolved = file_path.resolve()
+    for root in roots:
+        try:
+            resolved.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def kb_get(conn: sqlite3.Connection, cfg: dict[str, Any], path: str) -> dict:
+    logical = (path or "").strip().lstrip("/").replace("\\", "/")
+    if not logical or ".." in logical.split("/"):
         return {"error": "invalid path"}
+
     row = conn.execute(
-        "SELECT path, title, tags, body, mtime FROM notes WHERE path = ?",
-        (rel,),
+        "SELECT path, root_id, rel_path, abs_path, title, tags, body, mtime FROM notes WHERE path = ?",
+        (logical,),
     ).fetchone()
+
+    roots = _allowed_abs_paths(cfg)
+    file_path: Path | None = None
+    if row and row["abs_path"]:
+        file_path = Path(row["abs_path"])
+    else:
+        # Resolve logical path against configured roots: root_id/rel...
+        parts = logical.split("/", 1)
+        if len(parts) == 2:
+            rid, rel = parts
+            for root in cfg["roots"]:
+                if root["id"] == rid:
+                    file_path = root["path"] / rel
+                    break
+
+    # Prefer live disk content (source of truth stays in project folders)
+    if file_path is not None and file_path.is_file():
+        if not _is_under_roots(file_path, roots):
+            return {"error": "path escapes configured roots"}
+        text = file_path.read_text(encoding="utf-8", errors="replace")
+        # strip front matter visually same as indexer body? keep raw for accuracy
+        return {
+            "path": logical,
+            "root_id": row["root_id"] if row else logical.split("/", 1)[0],
+            "abs_path": str(file_path.resolve()),
+            "title": row["title"] if row else file_path.stem,
+            "tags": row["tags"] if row else "",
+            "mtime": row["mtime"] if row else "",
+            "content": text,
+            "source": "live-disk",
+        }
+
     if row:
         return {
             "path": row["path"],
+            "root_id": row["root_id"],
+            "abs_path": row["abs_path"],
             "title": row["title"],
             "tags": row["tags"],
             "mtime": row["mtime"],
             "content": row["body"],
+            "source": "index-cache",
+            "warning": "original file missing; serving last indexed body",
         }
-    # live read fallback
-    file_path = (kb_root / rel).resolve()
-    if not str(file_path).startswith(str(kb_root.resolve())):
-        return {"error": "path escapes kb root"}
-    if not file_path.is_file():
-        return {"error": f"not found: {rel}"}
-    return {
-        "path": rel,
-        "title": file_path.stem,
-        "tags": "",
-        "mtime": "",
-        "content": file_path.read_text(encoding="utf-8", errors="replace"),
-    }
+
+    return {"error": f"not found: {logical}"}
 
 
-def kb_list(conn: sqlite3.Connection, prefix: str = "", limit: int = 50) -> dict:
+def kb_list(
+    conn: sqlite3.Connection,
+    prefix: str = "",
+    limit: int = 50,
+    root: str | None = None,
+) -> dict:
     limit = max(1, min(int(limit or 50), 200))
-    prefix = (prefix or "").strip().lstrip("/")
+    prefix = (prefix or "").strip().lstrip("/").replace("\\", "/")
+    root = (root or "").strip() or None
+
+    clauses: list[str] = []
+    params: list[Any] = []
+    if root:
+        clauses.append("root_id = ?")
+        params.append(root)
     if prefix:
-        rows = conn.execute(
-            "SELECT path, title, tags, mtime FROM notes "
-            "WHERE path LIKE ? ORDER BY path LIMIT ?",
-            (f"{prefix}%", limit),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT path, title, tags, mtime FROM notes ORDER BY path LIMIT ?",
-            (limit,),
-        ).fetchall()
-    return {
-        "count": len(rows),
-        "notes": [dict(r) for r in rows],
-    }
+        clauses.append("path LIKE ?")
+        params.append(f"{prefix}%")
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(limit)
+    rows = conn.execute(
+        f"SELECT path, root_id, rel_path, abs_path, title, tags, mtime FROM notes "
+        f"{where} ORDER BY path LIMIT ?",
+        params,
+    ).fetchall()
+    return {"count": len(rows), "notes": [dict(r) for r in rows]}
 
 
-def kb_stats(conn: sqlite3.Connection, kb_root: Path, db_path: Path) -> dict:
+def kb_stats(conn: sqlite3.Connection, cfg: dict[str, Any]) -> dict:
     total = conn.execute("SELECT COUNT(*) AS c FROM notes").fetchone()["c"]
-    meta = {
-        r["key"]: r["value"]
-        for r in conn.execute("SELECT key, value FROM meta")
+    by_root = {
+        r["root_id"]: r["c"]
+        for r in conn.execute(
+            "SELECT root_id, COUNT(*) AS c FROM notes GROUP BY root_id"
+        )
     }
+    meta = {r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM meta")}
+    roots_meta = None
+    if meta.get("roots"):
+        try:
+            roots_meta = json.loads(meta["roots"])
+        except json.JSONDecodeError:
+            roots_meta = meta["roots"]
     return {
         "total_notes": total,
-        "kb_root": str(kb_root),
-        "db_path": str(db_path),
+        "by_root": by_root,
+        "db_path": str(cfg["db_path"]),
+        "config_path": str(cfg["config_path"]) if cfg.get("config_path") else None,
+        "configured_roots": [
+            {"id": r["id"], "path": str(r["path"]), "description": r.get("description") or ""}
+            for r in cfg["roots"]
+        ],
+        "indexed_roots": roots_meta,
         "indexed_at": meta.get("indexed_at"),
-        "meta_kb_root": meta.get("kb_root"),
+        "mode": "in-place (no copy)",
     }
 
 
 def call_tool(name: str, arguments: dict[str, Any]) -> Any:
-    kb_root, db_path = env_paths()
+    cfg = current_config()
     if name == "kb_reindex":
-        return rebuild(kb_root, db_path)
+        return rebuild_from_config(cfg)
 
-    conn = ensure_db(db_path, kb_root)
+    conn = ensure_db(cfg)
     try:
         if name == "kb_search":
-            return kb_search(conn, arguments.get("query", ""), arguments.get("limit", 8))
+            return kb_search(
+                conn,
+                arguments.get("query", ""),
+                arguments.get("limit", 8),
+                arguments.get("root"),
+            )
         if name == "kb_get":
-            return kb_get(conn, kb_root, arguments.get("path", ""))
+            return kb_get(conn, cfg, arguments.get("path", ""))
         if name == "kb_list":
-            return kb_list(conn, arguments.get("prefix", ""), arguments.get("limit", 50))
+            return kb_list(
+                conn,
+                arguments.get("prefix", ""),
+                arguments.get("limit", 50),
+                arguments.get("root"),
+            )
         if name == "kb_stats":
-            return kb_stats(conn, kb_root, db_path)
+            return kb_stats(conn, cfg)
         return {"error": f"unknown tool: {name}"}
     finally:
         conn.close()
@@ -295,12 +394,10 @@ def text_result(payload: Any, is_error: bool = False) -> dict:
 
 
 def handle(msg: dict[str, Any]) -> dict[str, Any] | None:
-    """Handle one JSON-RPC request; return response or None for notifications."""
     method = msg.get("method")
     msg_id = msg.get("id")
     params = msg.get("params") or {}
 
-    # notifications (no id)
     if msg_id is None and method:
         return None
 
@@ -319,11 +416,7 @@ def handle(msg: dict[str, Any]) -> dict[str, Any] | None:
         return {"jsonrpc": "2.0", "id": msg_id, "result": {}}
 
     if method == "tools/list":
-        return {
-            "jsonrpc": "2.0",
-            "id": msg_id,
-            "result": {"tools": tool_defs()},
-        }
+        return {"jsonrpc": "2.0", "id": msg_id, "result": {"tools": tool_defs()}}
 
     if method == "tools/call":
         name = params.get("name", "")
@@ -336,7 +429,7 @@ def handle(msg: dict[str, Any]) -> dict[str, Any] | None:
                 "id": msg_id,
                 "result": text_result(result, is_error=bool(err)),
             }
-        except Exception as exc:  # noqa: BLE001 — surface to MCP client
+        except Exception as exc:  # noqa: BLE001
             return {
                 "jsonrpc": "2.0",
                 "id": msg_id,
@@ -357,7 +450,6 @@ def handle(msg: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def read_message() -> dict[str, Any] | None:
-    """Read one MCP message (Content-Length framing or newline-delimited JSON)."""
     header = b""
     while True:
         ch = sys.stdin.buffer.read(1)
@@ -366,7 +458,6 @@ def read_message() -> dict[str, Any] | None:
         header += ch
         if header.endswith(b"\r\n\r\n") or header.endswith(b"\n\n"):
             break
-        # newline-delimited JSON (no headers)
         if b"\n" in header and b"Content-Length" not in header.upper() and b"{" in header:
             line = header.strip()
             if line:
@@ -399,7 +490,6 @@ def write_message(msg: dict[str, Any]) -> None:
 
 
 def main() -> int:
-    # Avoid polluting MCP stdio with accidental prints
     while True:
         try:
             msg = read_message()
@@ -410,7 +500,6 @@ def main() -> int:
         resp = handle(msg)
         if resp is not None:
             write_message(resp)
-        # initialized notification etc. — no response
     return 0
 
 
