@@ -1,0 +1,32 @@
+{
+  "roots": [
+    {
+      "id": "notes",
+      "path": "kb",
+      "description": "个人随笔 / 跨项目沉淀（可选）"
+    },
+    {
+      "id": "projects",
+      "path": "D:/项目",
+      "description": "D盘项目文件夹：原地索引，不复制、不搬迁"
+    }
+  ],
+  "include_extensions": [".md", ".mdx", ".txt"],
+  "exclude_dir_names": [
+    ".git",
+    "node_modules",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+    "__pycache__",
+    ".cursor",
+    ".idea",
+    ".vscode",
+    "data",
+    "vendor",
+    "target",
+    "bin",
+    "obj"
+  ]
+}

@@ -1,0 +1,7 @@
+# personal-kb 依赖说明
+
+本项目 **不需要** `pip install`。
+
+运行环境：Python 3.10+（需 SQLite ≥ 3.34，以支持 FTS5 `trigram` tokenizer）。
+
+可选：若系统 Python 过旧，再用虚拟环境；默认直接用系统 `python3` 即可。

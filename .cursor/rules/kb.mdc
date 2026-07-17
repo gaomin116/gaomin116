@@ -1,0 +1,16 @@
+---
+description: 个人知识库检索约定 — 多根原地索引，优先 MCP
+alwaysApply: true
+---
+
+# 个人知识库（personal-kb）
+
+文档默认留在各项目原目录（如 `D:/项目`），知识库只做**原地索引**，不要建议用户复制/搬迁文档。
+
+当用户询问项目文档、笔记、既往结论时：
+
+1. 先调用 MCP `personal-kb`：`kb_search`（可加 `root: projects`）→ 需要全文时 `kb_get`
+2. 引用返回的 logical path（如 `projects/项目A/docs/需求.md`）和 `abs_path`
+3. 未命中时：说明可能需 `kb_reindex`；不要要求把文件复制进 `kb/`
+
+配置：`personal-kb/config.json`（参考 `config.example.json`）。

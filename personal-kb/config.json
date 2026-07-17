@@ -1,0 +1,28 @@
+{
+  "roots": [
+    {
+      "id": "notes",
+      "path": "kb",
+      "description": "personal-kb 内置随笔（可继续用）"
+    },
+    {
+      "id": "projects",
+      "path": "fixtures/fake-D-projects",
+      "description": "演示：模拟 D盘/项目 的原地索引（请在本机改成真实路径）"
+    }
+  ],
+  "include_extensions": [".md", ".mdx", ".txt"],
+  "exclude_dir_names": [
+    ".git",
+    "node_modules",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+    "__pycache__",
+    ".cursor",
+    ".idea",
+    ".vscode",
+    "data"
+  ]
+}
